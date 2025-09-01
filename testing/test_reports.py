@@ -311,3 +311,75 @@ class TestHooks:
             _ = pytestconfig.hook.pytest_report_from_serializable(
                 config=pytestconfig, data=data
             )
+
+    def test_chained_exception_serialization(self, testdir):
+        """Test that chained exceptions are properly serialized/deserialized.
+        
+        This addresses issue where ExceptionChainRepr objects were being
+        converted to strings during serialization, losing chain information
+        when using xdist.
+        """
+        from _pytest._code.code import ExceptionChainRepr
+        
+        # Test explicit chaining (raise ... from ...)
+        reprec = testdir.inline_runsource(
+            """
+            def test_chained_exception_with_from():
+                try:
+                    try:
+                        raise ValueError("inner")
+                    except Exception as e1:
+                        raise ValueError("outer") from e1
+                except Exception as e2:
+                    raise ValueError("final") from e2
+            """
+        )
+        reports = reprec.getreports("pytest_runtest_logreport")
+        call_report = [r for r in reports if r.when == "call" and r.failed][0]
+        
+        # Verify original report has chained exception
+        assert isinstance(call_report.longrepr, ExceptionChainRepr)
+        assert len(call_report.longrepr.chain) == 3
+        
+        # Test serialization/deserialization
+        serialized = call_report._to_json()
+        assert "chain" in serialized["longrepr"]
+        assert len(serialized["longrepr"]["chain"]) == 3
+        
+        deserialized = TestReport._from_json(serialized)
+        assert isinstance(deserialized.longrepr, ExceptionChainRepr)
+        assert len(deserialized.longrepr.chain) == 3
+        
+        # Verify string representations match
+        assert str(call_report.longrepr) == str(deserialized.longrepr)
+        
+        # Test implicit chaining (nested exceptions without from)
+        reprec2 = testdir.inline_runsource(
+            """
+            def test_chained_exception_without_from():
+                try:
+                    try:
+                        raise ValueError("inner")
+                    except Exception:
+                        raise ValueError("outer")
+                except Exception:
+                    raise ValueError("final")
+            """
+        )
+        reports2 = reprec2.getreports("pytest_runtest_logreport")
+        call_report2 = [r for r in reports2 if r.when == "call" and r.failed][0]
+        
+        # Verify original report has chained exception
+        assert isinstance(call_report2.longrepr, ExceptionChainRepr)
+        assert len(call_report2.longrepr.chain) == 3
+        
+        # Test serialization/deserialization
+        serialized2 = call_report2._to_json()
+        assert "chain" in serialized2["longrepr"]
+        
+        deserialized2 = TestReport._from_json(serialized2)
+        assert isinstance(deserialized2.longrepr, ExceptionChainRepr)
+        assert len(deserialized2.longrepr.chain) == 3
+        
+        # Verify string representations match
+        assert str(call_report2.longrepr) == str(deserialized2.longrepr)
